@@ -113,6 +113,7 @@ extern "C" {
  *****************************************************************************/
 
 struct as_operations_s;
+struct as_partitions_status_s;
 
 /**
  * Union of supported predicates
@@ -519,6 +520,18 @@ typedef struct as_query_s {
 	struct as_operations_s* ops;
 
 	/**
+	 * Status of all partitions.
+	 */
+	struct as_partitions_status_s* parts_all;
+
+	/**
+	 * Set to true if as_policy_scan.max_records is set and you need to scan data in pages.
+	 *
+	 * Default: false
+	 */
+	bool paginate;
+
+	/**
 	 * Set to true if query should only return keys and no bin data.
 	 *
 	 * Default value is false.
@@ -851,6 +864,18 @@ as_query_predexp_add(as_query* query, as_predexp_base * predexp);
  */
 AS_EXTERN bool
 as_query_apply(as_query* query, const char* module, const char* function, const as_list* arglist);
+
+/**
+ * Set to true if as_policy_query.max_records is set and you need to query data in pages.
+ *
+ * @relates as_query
+ * @ingroup query_object
+ */
+static inline void
+as_query_set_paginate(as_query* query, bool paginate)
+{
+	query->paginate = paginate;
+}
 
 #ifdef __cplusplus
 } // end extern "C"

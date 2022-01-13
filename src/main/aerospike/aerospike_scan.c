@@ -25,6 +25,7 @@
 #include <aerospike/as_msgpack.h>
 #include <aerospike/as_operations.h>
 #include <aerospike/as_partition_tracker.h>
+#include <aerospike/as_query.h>
 #include <aerospike/as_query_validate.h>
 #include <aerospike/as_random.h>
 #include <aerospike/as_serializer.h>
@@ -89,10 +90,12 @@ typedef struct as_scan_builder {
 	as_buffer argbuffer;
 	as_queue* opsbuffers;
 	uint64_t max_records;
+	uint32_t filter_size;
 	uint32_t predexp_size;
 	uint32_t task_id_offset;
 	uint32_t parts_full_size;
-	uint32_t parts_partial_size;
+	uint32_t parts_partial_digest_size;
+	uint32_t parts_partial_bval_size;
 	uint32_t cmd_size_pre;
 	uint32_t cmd_size_post;
 	uint16_t n_fields;
@@ -169,7 +172,11 @@ as_scan_parse_record_async(
 	
 	rec.gen = msg->generation;
 	rec.ttl = cf_server_void_time_to_ttl(msg->record_ttl);
-	*pp = as_command_parse_key(*pp, msg->n_fields, &rec.key);
+
+	int64_t bval;
+	bool bval_set = false;
+
+	*pp = as_command_parse_key(*pp, msg->n_fields, &rec.key, &bval, &bval_set);
 
 	as_status status = as_command_parse_bins(pp, err, &rec, msg->n_ops,
 											 sc->command.flags2 & AS_ASYNC_FLAGS2_DESERIALIZE);
@@ -188,7 +195,8 @@ as_scan_parse_record_async(
 	}
 
 	if (sc->np) {
-		as_partition_tracker_set_digest(se->pt, sc->np, &rec.key.digest, sc->command.cluster->n_partitions);
+		as_partition_tracker_set_resume_info(se->pt, sc->np, &rec.key.digest,
+				bval_set ? &bval : NULL, sc->command.cluster->n_partitions);
 	}
 
 	as_record_destroy(&rec);
@@ -267,7 +275,11 @@ as_scan_parse_record(uint8_t** pp, as_msg* msg, as_scan_task* task, as_error* er
 	
 	rec.gen = msg->generation;
 	rec.ttl = cf_server_void_time_to_ttl(msg->record_ttl);
-	*pp = as_command_parse_key(*pp, msg->n_fields, &rec.key);
+
+	int64_t bval;
+	bool bval_set = false;
+
+	*pp = as_command_parse_key(*pp, msg->n_fields, &rec.key, &bval, &bval_set);
 
 	as_status status = as_command_parse_bins(pp, err, &rec, msg->n_ops, task->scan->deserialize_list_map);
 
@@ -286,7 +298,9 @@ as_scan_parse_record(uint8_t** pp, as_msg* msg, as_scan_task* task, as_error* er
 	}
 
 	if (task->pt) {
-		as_partition_tracker_set_digest(task->pt, task->np, &rec.key.digest, task->cluster->n_partitions);
+		as_partition_tracker_set_resume_info(task->pt, task->np,
+				&rec.key.digest, bval_set ? &bval : NULL,
+				task->cluster->n_partitions);
 	}
 	as_record_destroy(&rec);
 	return AEROSPIKE_OK;
@@ -349,20 +363,27 @@ as_scan_parse_records(as_error* err, as_node* node, uint8_t* buf, size_t size, v
 	return AEROSPIKE_OK;
 }
 
+#define BVAL_SIZE 8
+
 static size_t
 as_scan_command_size(const as_policy_scan* policy, const as_scan* scan, as_scan_builder* sb)
 {
 	size_t size = AS_HEADER_SIZE;
+	uint32_t filter_size = 0;
 	uint32_t predexp_size = 0;
 	uint16_t n_fields = 0;
 
 	if (sb->np) {
 		sb->parts_full_size = sb->np->parts_full.size * 2;
-		sb->parts_partial_size = sb->np->parts_partial.size * 20;
+		sb->parts_partial_digest_size = sb->np->parts_partial.size *
+				AS_DIGEST_VALUE_SIZE;
+		sb->parts_partial_bval_size = scan->where == NULL ?
+				0 : sb->np->parts_partial.size * BVAL_SIZE;
 	}
 	else {
 		sb->parts_full_size = 0;
-		sb->parts_partial_size = 0;
+		sb->parts_partial_digest_size = 0;
+		sb->parts_partial_bval_size = 0;
 	}
 
 	if (scan->ns[0]) {
@@ -388,6 +409,46 @@ as_scan_command_size(const as_policy_scan* policy, const as_scan* scan, as_scan_
 	size += as_command_field_size(8);
 	n_fields++;
 	
+	// Estimate indextype size.
+	// For single where clause queries
+	if (scan->where != NULL) {
+		size += as_command_field_size(1);
+		n_fields++;
+
+		size += AS_FIELD_HEADER_SIZE;
+		filter_size++;  // Add byte for num filters.
+
+		for (uint16_t i = 0; i < scan->where->size; i++) {
+			as_predicate* pred = &scan->where->entries[i];
+
+			// bin name size(1) + particle type size(1) + begin particle size(4) + end particle size(4) = 10
+			filter_size += (uint32_t)strlen(pred->bin) + 10;
+
+			switch(pred->type) {
+			case AS_PREDICATE_EQUAL:
+				if (pred->dtype == AS_INDEX_STRING) {
+					filter_size += (uint32_t)strlen(pred->value.string) * 2;
+				}
+				else if (pred->dtype == AS_INDEX_NUMERIC) {
+					filter_size += sizeof(int64_t) * 2;
+				}
+				break;
+			case AS_PREDICATE_RANGE:
+				if (pred->dtype == AS_INDEX_NUMERIC) {
+					filter_size += sizeof(int64_t) * 2;
+				}
+				else if (pred->dtype == AS_INDEX_GEO2DSPHERE) {
+					filter_size += (uint32_t)strlen(pred->value.string) * 2;
+				}
+				break;
+			}
+		}
+		size += filter_size;
+		n_fields++;
+
+		sb->filter_size = filter_size;
+	}
+
 	// Estimate background function size.
 	as_buffer_init(&sb->argbuffer);
 	
@@ -433,8 +494,13 @@ as_scan_command_size(const as_policy_scan* policy, const as_scan* scan, as_scan_
 		n_fields++;
 	}
 
-	if (sb->parts_partial_size > 0) {
-		size += as_command_field_size(sb->parts_partial_size);
+	if (sb->parts_partial_digest_size > 0) {
+		size += as_command_field_size(sb->parts_partial_digest_size);
+		n_fields++;
+	}
+
+	if (sb->parts_partial_bval_size > 0) {
+		size += as_command_field_size(sb->parts_partial_bval_size);
 		n_fields++;
 	}
 
@@ -463,6 +529,81 @@ as_scan_command_size(const as_policy_scan* policy, const as_scan* scan, as_scan_
 		}
 	}
 	return size;
+}
+
+static uint8_t*
+as_scan_write_range_string(uint8_t* p, char* begin, char* end)
+{
+	// Write particle type.
+	*p++ = AS_BYTES_STRING;
+
+	// Write begin value.
+	char* q = begin;
+	uint32_t* len_ptr = (uint32_t*)p;
+	p += 4;
+	while (*q) {
+		*p++ = *q++;
+	}
+	*len_ptr = cf_swap_to_be32((uint32_t)(q - begin));
+
+	// Write end value.
+	q = end;
+	len_ptr = (uint32_t*)p;
+	p += 4;
+	while (*q) {
+		*p++ = *q++;
+	}
+	*len_ptr = cf_swap_to_be32((uint32_t)(q - end));
+
+	return p;
+}
+
+static uint8_t*
+as_scan_write_range_geojson(uint8_t* p, char* begin, char* end)
+{
+	// Write particle type.
+	*p++ = AS_BYTES_GEOJSON;
+
+	// Write begin value.
+	char* q = begin;
+	uint32_t* len_ptr = (uint32_t*)p;
+	p += 4;
+	while (*q) {
+		*p++ = *q++;
+	}
+	*len_ptr = cf_swap_to_be32((uint32_t)(q - begin));
+
+	// Write end value.
+	q = end;
+	len_ptr = (uint32_t*)p;
+	p += 4;
+	while (*q) {
+		*p++ = *q++;
+	}
+	*len_ptr = cf_swap_to_be32((uint32_t)(q - end));
+
+	return p;
+}
+
+static uint8_t*
+as_scan_write_range_integer(uint8_t* p, int64_t begin, int64_t end)
+{
+	// Write particle type.
+	*p++ = AS_BYTES_INTEGER;
+
+	// Write begin value.
+	*(uint32_t*)p = cf_swap_to_be32(sizeof(int64_t));
+	p += 4;
+	*(int64_t*)p = cf_swap_to_be64(begin);
+	p += sizeof(int64_t);
+
+	// Write end value.
+	*(uint32_t*)p = cf_swap_to_be32(sizeof(int64_t));
+	p += 4;
+	*(int64_t*)p = cf_swap_to_be64(end);
+	p += sizeof(int64_t);
+
+	return p;
 }
 
 static size_t
@@ -505,6 +646,49 @@ as_scan_command_init(
 	p = as_command_write_field_uint64(p, AS_FIELD_TASK_ID, task_id);
 	sb->task_id_offset = ((uint32_t)(p - cmd)) - sizeof(uint64_t);
 	
+	if (scan->where != NULL) {
+		// Write indextype.
+		as_predicate* pred = &scan->where->entries[0];
+		p = as_command_write_field_header(p, AS_FIELD_INDEX_TYPE, 1);
+		*p++ = pred->itype;
+
+		p = as_command_write_field_header(p, AS_FIELD_INDEX_RANGE,
+				sb->filter_size);
+		*p++ = (uint8_t)scan->where->size;
+
+		for (uint16_t i = 0; i < scan->where->size; i++ ) {
+			as_predicate* pred = &scan->where->entries[i];
+
+			// Write bin name, but do not transfer null byte.
+			uint8_t* len_ptr = p++;
+			uint8_t* s = (uint8_t*)pred->bin;
+			while (*s) {
+				*p++ = *s++;
+			}
+			*len_ptr = (uint8_t)(s - (uint8_t*)pred->bin);
+
+			// Write particle type and range values.
+			switch(pred->type) {
+			case AS_PREDICATE_EQUAL:
+				if (pred->dtype == AS_INDEX_STRING) {
+					p = as_scan_write_range_string(p, pred->value.string, pred->value.string);
+				}
+				else if (pred->dtype == AS_INDEX_NUMERIC) {
+					p = as_scan_write_range_integer(p, pred->value.integer, pred->value.integer);
+				}
+				break;
+			case AS_PREDICATE_RANGE:
+				if (pred->dtype == AS_INDEX_NUMERIC) {
+					p = as_scan_write_range_integer(p, pred->value.integer_range.min, pred->value.integer_range.max);
+				}
+				else if (pred->dtype == AS_INDEX_GEO2DSPHERE) {
+					p = as_scan_write_range_geojson(p, pred->value.string, pred->value.string);
+				}
+				break;
+			}
+		}
+	}
+
 	// Write background function
 	if (scan->apply_each.function[0]) {
 		p = as_command_write_field_header(p, AS_FIELD_UDF_OP, 1);
@@ -544,8 +728,9 @@ as_scan_command_init(
 		}
 	}
 
-	if (sb->parts_partial_size > 0) {
-		p = as_command_write_field_header(p, AS_FIELD_DIGEST_ARRAY, sb->parts_partial_size);
+	if (sb->parts_partial_digest_size > 0) {
+		p = as_command_write_field_header(p, AS_FIELD_DIGEST_ARRAY,
+				sb->parts_partial_digest_size);
 
 		as_partition_tracker* pt = sb->pt;
 		as_vector* list = &sb->np->parts_partial;
@@ -554,6 +739,20 @@ as_scan_command_init(
 			as_partition_status* ps = as_partition_tracker_get_status(pt, list, i);
 			memcpy(p, ps->digest.value, AS_DIGEST_VALUE_SIZE);
 			p += AS_DIGEST_VALUE_SIZE;
+		}
+	}
+
+	if (sb->parts_partial_bval_size > 0) {
+		p = as_command_write_field_header(p, AS_FIELD_BVAL_ARRAY,
+				sb->parts_partial_bval_size);
+
+		as_partition_tracker* pt = sb->pt;
+		as_vector* list = &sb->np->parts_partial;
+
+		for (uint32_t i = 0; i < list->size; i++) {
+			as_partition_status* ps = as_partition_tracker_get_status(pt, list, i);
+			memcpy(p, &ps->bval, BVAL_SIZE);
+			p += BVAL_SIZE;
 		}
 	}
 

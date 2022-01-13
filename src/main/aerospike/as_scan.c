@@ -51,6 +51,8 @@ as_scan_defaults(as_scan* scan, bool free, const as_namespace ns, const as_set s
 	scan->select.size = 0;
 	scan->select.entries = NULL;
 
+	scan->where = NULL;
+
 	scan->predexp._free = false;
 	scan->predexp.capacity = 0;
 	scan->predexp.size = 0;

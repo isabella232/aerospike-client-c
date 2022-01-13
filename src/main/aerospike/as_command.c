@@ -1001,7 +1001,7 @@ as_command_ignore_bins(uint8_t* p, uint32_t n_bins)
 }
 
 uint8_t*
-as_command_parse_key(uint8_t* p, uint32_t n_fields, as_key* key)
+as_command_parse_key(uint8_t* p, uint32_t n_fields, as_key* key, int64_t* bval, bool* bval_set)
 {
 	uint32_t len;
 	uint32_t size;
@@ -1068,6 +1068,12 @@ as_command_parse_key(uint8_t* p, uint32_t n_fields, as_key* key)
 						break;
 					}
 				}
+				break;
+
+			case AS_FIELD_BVAL_ARRAY :
+				size = sizeof(int64_t);
+				memcpy(bval, p, size);
+				*bval_set = true;
 				break;
 		}
 		p += len;

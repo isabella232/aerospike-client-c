@@ -50,6 +50,7 @@ extern "C" {
 #define AS_FIELD_PID_ARRAY 11
 #define AS_FIELD_DIGEST_ARRAY 12
 #define AS_FIELD_SCAN_MAX_RECORDS 13
+#define AS_FIELD_BVAL_ARRAY 15
 #define AS_FIELD_INDEX_RANGE 22
 #define AS_FIELD_INDEX_FILTER 23
 #define AS_FIELD_INDEX_LIMIT 24
@@ -635,7 +636,8 @@ as_command_ignore_bins(uint8_t* p, uint32_t n_bins);
  * Parse key fields received from server.  Used for reads.
  */
 uint8_t*
-as_command_parse_key(uint8_t* p, uint32_t n_fields, as_key* key);
+as_command_parse_key(uint8_t* p, uint32_t n_fields, as_key* key, int64_t* bval, bool* bval_set);
+
 
 /**
  * @private

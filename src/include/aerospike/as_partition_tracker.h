@@ -105,13 +105,19 @@ as_partition_tracker_part_done(as_partition_tracker* pt, as_node_partitions* np,
 }
 
 static inline void
-as_partition_tracker_set_digest(
-	as_partition_tracker* pt, as_node_partitions* np, as_digest* digest, uint32_t n_partitions
+as_partition_tracker_set_resume_info(
+	as_partition_tracker* pt, as_node_partitions* np, as_digest* digest,
+	int64_t* bval, uint32_t n_partitions
 	)
 {
 	uint32_t part_id = as_partition_getid(digest->value, n_partitions);
 	as_partitions_status* ps = pt->parts_all;
 	ps->parts[part_id - ps->part_begin].digest = *digest;
+
+	if (bval != NULL) {
+		ps->parts[part_id - ps->part_begin].bval = *bval;
+	}
+
 	np->record_count++;
 }
 

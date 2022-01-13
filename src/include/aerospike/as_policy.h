@@ -906,6 +906,24 @@ typedef struct as_policy_query_s {
 	as_policy_base base;
 
 	/**
+	 * Approximate number of records to return to client. This number is divided by the
+	 * number of nodes involved in the query.  The actual number of records returned
+	 * may be less than max_records if node record counts are small and unbalanced across
+	 * nodes.
+	 *
+	 * Default: 0 (do not limit record count)
+	 */
+	uint64_t max_records;
+
+	/**
+	 * Limit returned records per second (rps) rate for each server.
+	 * Do not apply rps limit if records_per_second is zero.
+	 *
+	 * Default: 0
+	 */
+	uint32_t records_per_second;
+
+	/**
 	 * Timeout used when info command is used that checks for cluster changes before and 
 	 * after the query.  This timeout is only used when fail_on_cluster_change is true and
 	 * the query where clause is defined.

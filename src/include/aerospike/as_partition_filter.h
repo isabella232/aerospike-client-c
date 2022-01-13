@@ -35,6 +35,7 @@ extern "C" {
 typedef struct as_partition_status_s {
 	uint16_t part_id;
 	as_digest digest;
+	int64_t bval; // FIXME(varun): should it be uint8_t bval[BVAL_SIZE]
 	bool done;
 } as_partition_status;
 

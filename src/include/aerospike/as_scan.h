@@ -50,6 +50,7 @@ extern "C" {
  *****************************************************************************/
 
 struct as_operations_s;
+struct as_query_predicates_s;
 
 /**
  * The status of a particular background scan.
@@ -322,6 +323,17 @@ typedef struct as_scan_s {
 	 * Use as_scan_select() to populate.
 	 */
 	as_scan_bins select;
+
+	/**
+	 * Predicates for filtering.
+	 *
+	 * Use either of the following function to initialize:
+	 * - as_query_where_init() -	To initialize on the heap.
+	 * - as_query_where_inita() - To initialize on the stack.
+	 *
+	 * Use as_query_where() to populate.
+	 */
+	struct as_query_predicates_s* where;
 
 	/**
 	 * This field is mutually exclusive with as_policy_base predexp and filter_exp.

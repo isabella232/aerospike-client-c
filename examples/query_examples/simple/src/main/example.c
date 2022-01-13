@@ -33,12 +33,24 @@
 #include <aerospike/aerospike_query.h>
 #include <aerospike/as_error.h>
 #include <aerospike/as_key.h>
+#include <aerospike/as_partition_filter.h>
 #include <aerospike/as_query.h>
 #include <aerospike/as_record.h>
 #include <aerospike/as_status.h>
 #include <aerospike/as_val.h>
 
 #include "example_utils.h"
+
+
+//==========================================================
+// Typedefs and Structs
+//
+
+struct counter {
+	uint32_t count;
+	uint32_t max;
+	as_digest digest;
+};
 
 
 //==========================================================
@@ -55,6 +67,8 @@ const char TEST_INDEX_NAME[] = "test-bin-index";
 bool query_cb(const as_val* p_val, void* udata);
 void cleanup(aerospike* p_as);
 bool insert_records(aerospike* p_as);
+static bool query_terminate_cb(const as_val* val, void* udata);
+static bool query_resume_cb(const as_val* val, void* udata);
 
 
 //==========================================================
@@ -103,29 +117,62 @@ main(int argc, char* argv[])
 	// care of destroying all the query's member objects if necessary. However
 	// using as_query_where_inita() does avoid internal heap usage.
 	as_query_where_inita(&query, 1);
-	as_query_where(&query, "test-bin", as_integer_equals(7));
+	as_query_where(&query, "test-bin", as_integer_range(0, g_n_keys / 2));
 
-	LOG("executing query: where test-bin = 7");
+	LOG("executing query: where test-bin = 0 to g_n_keys / 2");
 
-	// Execute the query. This call blocks - callbacks are made in the scope of
-	// this call.
-	if (aerospike_query_foreach(&as, &err, NULL, &query, query_cb, NULL) !=
-			AEROSPIKE_OK) {
-		LOG("aerospike_query_foreach() returned %d - %s", err.code,
-				err.message);
+	LOG("start query terminate");
+
+	struct counter c;
+	c.count = 0;
+	c.max = 3;
+
+	as_query_set_paginate(&query, true);
+
+	as_status status = aerospike_query_foreach(&as, &err, NULL, &query, query_terminate_cb, &c);
+
+	if (status != AEROSPIKE_OK) {
 		as_query_destroy(&query);
-		cleanup(&as);
-		exit(-1);
+		return status;
 	}
 
-	LOG("query executed");
+	LOG("terminate records returned: %u", c.count);
+	LOG("start query resume");
 
+	// Store completion status of all partitions.
+	as_partitions_status* parts_all = as_partitions_status_reserve(query.parts_all);
+
+	// Destroy query
 	as_query_destroy(&query);
+
+	as_query query_resume;
+	as_partition_filter pf;
+
+	do
+	{
+		// Resume query using new query instance.
+		as_query_init(&query_resume, g_namespace, g_set);
+
+		as_partition_filter_set_partitions(&pf, parts_all);
+
+		c.count = 0;
+		c.max = 3;
+
+		status = aerospike_query_partitions(&as, &err, NULL, &query_resume, &pf, query_terminate_cb, &c);
+
+		LOG("resume records returned: %u", c.count);
+
+		as_partitions_status_release(parts_all);
+
+		if (c.count != 0) {
+			parts_all = as_partitions_status_reserve(query_resume.parts_all);
+		}
+
+		as_query_destroy(&query_resume);
+	} while (c.count != 0);
 
 	// Cleanup and disconnect from the database cluster.
 	cleanup(&as);
-
-	LOG("simple query example successfully completed");
 
 	return 0;
 }
@@ -204,3 +251,44 @@ insert_records(aerospike* p_as)
 
 	return true;
 }
+
+
+//==========================================================
+// Query Terminate and Resume
+//
+
+static bool
+query_terminate_cb(const as_val* val, void* udata)
+{
+	if (! val) {
+		// Query complete.
+		return true;
+	}
+
+	struct counter* c = udata;
+
+	// query.concurrent is false, so atomics are not necessary.
+	if (c->count >= c->max) {
+		// Since we are terminating the query here, the query last digest
+		// will not be set and the current record will be returned again
+		// if the query resumes at a later time.
+		return false;
+	}
+
+	c->count++;
+	return true;
+}
+
+static bool
+query_resume_cb(const as_val* val, void* udata)
+{
+	if (! val) {
+		// Query complete.
+		return true;
+	}
+
+	struct counter* c = udata;
+	c->count++;
+	return true;
+}
+
