@@ -152,6 +152,8 @@ main(int argc, char* argv[])
 	{
 		// Resume query using new query instance.
 		as_query_init(&query_resume, g_namespace, g_set);
+		as_query_where_inita(&query_resume, 1);
+		as_query_where(&query_resume, "test-bin", as_integer_range(0, g_n_keys / 2));
 
 		as_partition_filter_set_partitions(&pf, parts_all);
 
