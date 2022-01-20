@@ -1411,6 +1411,7 @@ static inline as_policy_query*
 as_policy_query_init(as_policy_query* p)
 {
 	as_policy_base_query_init(&p->base);
+	p->max_records = 0;
 	p->info_timeout = 10000;
 	p->fail_on_cluster_change = false;
 	p->deserialize = true;
